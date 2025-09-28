@@ -15,7 +15,7 @@ chmod +x /usr/local/bin/copyparty-sfx.py
 useradd -r -s /sbin/nologin -m -d /var/lib/copyparty copyparty
 
 # Download default config
-wget https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.conf -O /var/lib/copyparty/copyparty.conf
+wget https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.conf -O /etc/copyparty.conf
 
 echo "Currently youre using the default config. Please edit /var/lib/copyparty/copyparty.conf as needed."
 
