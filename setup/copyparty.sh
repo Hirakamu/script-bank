@@ -6,7 +6,6 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 echo "Setting up copyparty..."
-sleep 1
 
 # Create copyparty user
 id copyparty &>/dev/null || useradd -r -s /sbin/nologin -m -d /var/lib/copyparty copyparty
@@ -21,6 +20,7 @@ if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
   wget -q --show-progress https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.conf -O /etc/copyparty.conf
   echo "Config installed at /etc/copyparty.conf"
 fi
+echo ''
 
 # Ask for service
 read -rp "Do you want to install the systemd service file? [Y/n] " ans
@@ -31,9 +31,11 @@ if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
   systemctl restart copyparty.service
   echo "Service enabled and started."
 fi
+echo ''
 
 echo "Copyparty setup complete."
-sleep 1
 echo "You can edit the config file at /etc/copyparty.conf"
 echo "Then start/restart the service with: systemctl start|restart copyparty.service"
 echo "Access the web interface at http://<your-ip>:8000"
+sleep 1
+exit 0
