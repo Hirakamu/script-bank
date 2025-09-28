@@ -7,12 +7,13 @@ fi
 
 echo "Setting up copyparty..."
 sleep 2
-# Install core app
-wget https://github.com/9001/copyparty/releases/latest/download/copyparty-sfx.py -O /usr/local/bin/copyparty-sfx.py
-chmod +x /usr/local/bin/copyparty-sfx.py
 
 # Create copyparty user
 useradd -r -s /sbin/nologin -m -d /var/lib/copyparty copyparty
+
+# Install core app
+wget https://github.com/9001/copyparty/releases/latest/download/copyparty-sfx.py -O /usr/local/bin/copyparty-sfx.py
+chmod +x /usr/local/bin/copyparty-sfx.py
 
 # Download default config
 wget https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.conf -O /etc/copyparty.conf
