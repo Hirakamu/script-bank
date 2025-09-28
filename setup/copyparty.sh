@@ -36,4 +36,4 @@ echo "Copyparty setup complete."
 sleep 1
 echo "You can edit the config file at /etc/copyparty.conf"
 echo "Then start/restart the service with: systemctl start|restart copyparty.service"
-echo "Access the web interface at http://<your-ip>:8000" 
+echo "Access the web interface at http://<your-ip>:8000"
