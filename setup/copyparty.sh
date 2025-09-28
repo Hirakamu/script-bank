@@ -39,8 +39,8 @@ if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
   wget -q --show-progress https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.nginx -O /etc/nginx/sites-available/copyparty
   ln -sf /etc/nginx/sites-available/copyparty /etc/nginx/sites-enabled/copyparty
   nginx -t && systemctl reload nginx
-echo ''
 fi
+echo ''
 
 echo "Copyparty setup complete."
 echo "You can edit the config file at /etc/copyparty.conf"
