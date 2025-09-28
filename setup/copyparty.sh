@@ -19,8 +19,8 @@ read -rp "Do you want to install the default config? [Y/n] " ans
 if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
   wget -q --show-progress https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.conf -O /etc/copyparty.conf
   echo "Config installed at /etc/copyparty.conf"
+  echo ''
 fi
-echo ''
 
 # Ask for service
 read -rp "Do you want to install the systemd service file? [Y/n] " ans
@@ -30,8 +30,8 @@ if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
   systemctl enable copyparty.service
   systemctl restart copyparty.service
   echo "Service enabled and started."
+  echo ''
 fi
-echo ''
 
 # Ask for nginx config
 read -rp "Do you want to install the nginx config? [Y/n] " ans
@@ -39,8 +39,8 @@ if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
   wget -q --show-progress https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.nginx -O /etc/nginx/sites-available/copyparty
   ln -sf /etc/nginx/sites-available/copyparty /etc/nginx/sites-enabled/copyparty
   nginx -t && systemctl reload nginx
+  echo ''
 fi
-echo ''
 
 echo "Copyparty setup complete."
 echo "You can edit the config file at /etc/copyparty.conf"
