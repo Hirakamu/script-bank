@@ -20,7 +20,7 @@ wget https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty
 echo "Currently youre using the default config. Please edit /var/lib/copyparty/copyparty.conf as needed."
 
 # Setup systemd service
-wget https://raw.githubusercontent.com/hirakamu/script-bank/main/setup/copyparty.service -O /etc/systemd/system/copyparty.service
+wget https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.service -O /etc/systemd/system/copyparty.service
 systemctl daemon-reload
 systemctl enable copyparty.service
 systemctl start copyparty.service
