@@ -33,9 +33,29 @@ if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
 fi
 echo ''
 
+# Ask for nginx config
+read -rp "Do you want to install nginx config with SSL? [Y/n] " ans
+if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
+  apt-get update
+  apt-get install -y nginx certbot python3-certbot-nginx
+
+  read -rp "Enter your server_name (domain): " server_name
+
+  wget -q --show-progress https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty/copyparty.nginx -O /etc/nginx/sites-available/copyparty
+  sed -i "s/server_name_placeholder/$server_name/g" /etc/nginx/sites-available/copyparty
+
+  ln -sf /etc/nginx/sites-available/copyparty /etc/nginx/sites-enabled/copyparty
+  nginx -t && systemctl reload nginx
+
+  certbot --nginx -d "$server_name"
+  echo "Nginx config installed with SSL."
+fi
+echo ''
+
 echo "Copyparty setup complete."
 echo "You can edit the config file at /etc/copyparty.conf"
-echo "Then start/restart the service with: systemctl start|restart copyparty.service"
+echo "If you are using nginx, make sure to adjust the as needed."
 echo "Access the web interface at http://<your-ip>:3923"
+
 sleep 1
 exit 0
