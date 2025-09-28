@@ -24,5 +24,6 @@ wget https://raw.githubusercontent.com/hirakamu/script-bank/main/files/copyparty
 systemctl daemon-reload
 systemctl enable copyparty.service
 systemctl start copyparty.service
+systemctl restart copyparty.service
 
 echo "Copyparty setup complete. The service is now running."
