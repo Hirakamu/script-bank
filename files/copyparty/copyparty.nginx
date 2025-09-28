@@ -63,10 +63,7 @@ upstream cpp_uds {
 
 
 server {
-	listen 443 ssl;
-	listen [::]:443 ssl;
-
-	server_name fs.example.com;
+	listen 80;
 
 	# uncomment the following line to reject non-cloudflare connections, ensuring client IPs cannot be spoofed:
 	#include /etc/nginx/cloudflare-only.conf;
