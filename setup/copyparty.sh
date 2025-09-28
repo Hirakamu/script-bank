@@ -40,6 +40,7 @@ if [[ "$ans" =~ ^[Yy]$|^$ ]]; then
   ln -sf /etc/nginx/sites-available/copyparty /etc/nginx/sites-enabled/copyparty
   nginx -t && systemctl reload nginx
 echo ''
+fi
 
 echo "Copyparty setup complete."
 echo "You can edit the config file at /etc/copyparty.conf"
