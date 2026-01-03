@@ -3,30 +3,21 @@
 #=============================================================================
 # RNAS Management Script
 # Purpose: Manage remote NAS disk initialization, backup, deletion, and maintenance
-# Version: 1.3
+# Version: 2.0
 #=============================================================================
 
 set -euo pipefail
 
 # Version
-VERSION="1.3"
+VERSION="2.0"
 
 # Config file location
 CONFIG_DIR="/etc/rnas"
 CONFIG_FILE="${CONFIG_DIR}/rnas.conf"
 
-# Default Configuration (can be overridden by config file)
-RNAS_DIR="/var/rnas"
-DISK_EXIST_FILE="${RNAS_DIR}/DISK_EXIST"
-BACKUP_DISABLED_FILE="${RNAS_DIR}/BACKUP_DISABLED"
-MOUNT_POINT="/mnt/rnas/$(hostname)"
-IMAGE_PATH="${RNAS_DIR}/$(hostname).img"
-COPY_IMAGE_PATH="${RNAS_DIR}/$(hostname)-copy.img"
-IMAGE_SIZE="10G"
-REMOTE_SERVER="ip.hirakamu.my.id"
-REMOTE_PORT="9901"
-REMOTE_PATH="/receive"
-CRON_SCHEDULE="0 2 * * *"  # Daily at 2 AM
+# Default Configuration Values (overridden by config file if exists)
+# These are set by set_default_config() and load_config() functions
+# Derived variables are set by set_derived_variables() function
 
 # Colors for output
 RED='\033[0;31m'
@@ -917,6 +908,34 @@ cmd_status() {
     echo -e "${YELLOW}Remote Server:${NC} $REMOTE_SERVER:$REMOTE_PORT"
     echo -e "${YELLOW}Remote Path:${NC} $REMOTE_PATH"
     
+    # Config file status
+    echo ""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        echo -e "${YELLOW}Config File:${NC} ${GREEN}✓ ${NC}$CONFIG_FILE"
+    else
+        echo -e "${YELLOW}Config File:${NC} ${YELLOW}⚠ Using defaults${NC}"
+    fi
+    
+    # SSH Key status
+    if check_ssh_key &>/dev/null; then
+        local key_path=$(check_ssh_key)
+        echo -e "${YELLOW}SSH Key:${NC} ${GREEN}✓${NC} $key_path"
+    else
+        echo -e "${YELLOW}SSH Key:${NC} ${RED}✗ Not found${NC}"
+    fi
+    
+    # SSH Connection status (quick test)
+    if timeout 5 ssh -p "$REMOTE_PORT" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=3 \
+        -o StrictHostKeyChecking=accept-new \
+        "root@${REMOTE_SERVER}" \
+        "echo 'OK'" &>/dev/null; then
+        echo -e "${YELLOW}SSH Connection:${NC} ${GREEN}✓ Working${NC}"
+    else
+        echo -e "${YELLOW}SSH Connection:${NC} ${RED}✗ Failed${NC} (run 'rnas verify-connection')"
+    fi
+    
     # fstab check
     echo ""
     if grep -q "$IMAGE_PATH" /etc/fstab 2>/dev/null; then
@@ -1427,40 +1446,70 @@ RNAS Management Script v${VERSION}
 Usage: rnas.sh COMMAND [OPTIONS]
 
 Commands:
-  init              Initialize RNAS system (creates disk, mounts, sets up backup)
-  status            Show detailed RNAS status and configuration
-  backup            Backup disk image to remote server
-  backup --force    Force backup even if disabled
-  enable-backup     Enable automatic daily backups
-  disable-backup    Disable automatic daily backups
-  delete            Delete RNAS with backup before deletion
-  purge             Delete RNAS without backup (permanent)
-  copy-only         Create a backup copy without sending to server
-  expand SIZE       Expand disk by SIZE GB (e.g., expand 5)
-  repair            Repair RNAS configuration (fstab, cronjob, mount, symlink)
-  update            Update RNAS script to latest version from GitHub
-  help              Show this help message
+  init                 Initialize RNAS system (creates disk, mounts, sets up backup)
+  status               Show detailed RNAS status and configuration
+  
+  Configuration Management:
+  config-show          Display current configuration values
+  config-edit          Edit configuration file (creates if missing)
+  config-validate      Validate configuration file syntax
+  config-reset         Reset configuration to defaults
+  
+  SSH & Connectivity:
+  verify-connection    Test SSH and remote server connectivity
+  setup-ssh            Run SSH key setup wizard
+  
+  Backup Operations:
+  backup               Backup disk image to remote server
+  backup --force       Force backup even if disabled
+  enable-backup        Enable automatic daily backups
+  disable-backup       Disable automatic daily backups
+  
+  Maintenance:
+  delete               Delete RNAS with backup before deletion
+  purge                Delete RNAS without backup (permanent)
+  copy-only            Create a backup copy without sending to server
+  expand SIZE          Expand disk by SIZE GB (e.g., expand 5)
+  repair               Repair RNAS configuration (fstab, cronjob, mount, symlink)
+  update               Update RNAS script to latest version from GitHub
+  
+  help                 Show this help message
 
 Examples:
-  sudo rnas.sh init
-  sudo rnas.sh status
-  sudo rnas.sh backup
-  sudo rnas.sh backup --force
-  sudo rnas.sh enable-backup
-  sudo rnas.sh disable-backup
-  sudo rnas.sh delete
-  sudo rnas.sh purge
-  sudo rnas.sh copy-only
-  sudo rnas.sh expand 10
-  sudo rnas.sh repair
-  sudo rnas.sh update
+  # Initial setup
+  sudo rnas init
+  
+  # Configuration management
+  sudo rnas config-show
+  sudo rnas config-edit
+  sudo rnas verify-connection
+  
+  # Backup operations
+  sudo rnas status
+  sudo rnas backup
+  sudo rnas backup --force
+  sudo rnas enable-backup
+  sudo rnas disable-backup
+  
+  # Maintenance
+  sudo rnas expand 10
+  sudo rnas repair
+  sudo rnas update
+  
+  # Removal
+  sudo rnas delete
+  sudo rnas purge
 
 Configuration:
+  Config File:      $CONFIG_FILE
   RNAS Directory:   $RNAS_DIR
   Mount Point:      $MOUNT_POINT
   Image Path:       $IMAGE_PATH
-  Remote Server:    $REMOTE_SERVER:$REMOTE_PATH
+  Remote Server:    $REMOTE_SERVER:$REMOTE_PORT
+  Remote Path:      $REMOTE_PATH
   Backup Schedule:  $CRON_SCHEDULE
+
+For more information, visit: https://github.com/Hirakamu/script-bank
 
 EOF
 }
@@ -1481,12 +1530,52 @@ main() {
     check_root
     check_debian
     
+    # Set default configuration first (fallback)
+    set_default_config
+    
+    # Load config file if exists (except for init command which creates it)
+    if [[ "$command" != "init" ]]; then
+        if [[ -f "$CONFIG_FILE" ]]; then
+            load_config
+            if ! validate_config; then
+                log_error "Invalid configuration. Run 'rnas config-validate' for details"
+                exit 1
+            fi
+        else
+            # No config file, use defaults and set derived variables
+            log_warn "No configuration file found at $CONFIG_FILE"
+            log_warn "Using built-in defaults. Run 'rnas config-edit' to create configuration."
+            set_derived_variables
+        fi
+    else
+        # For init command, just set defaults and derived variables
+        set_derived_variables
+    fi
+    
     case "$command" in
         init)
             cmd_init
             ;;
         status)
             cmd_status
+            ;;
+        config-show)
+            cmd_config_show
+            ;;
+        config-edit)
+            cmd_config_edit
+            ;;
+        config-validate)
+            cmd_config_validate
+            ;;
+        config-reset)
+            cmd_config_reset
+            ;;
+        verify-connection)
+            cmd_verify_connection
+            ;;
+        setup-ssh)
+            cmd_setup_ssh
             ;;
         backup)
             # Check for --force flag
