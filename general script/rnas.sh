@@ -1192,6 +1192,7 @@ cmd_update() {
     local current_script="$(readlink -f "$0")"
     local temp_script="/tmp/rnas-update-$$.sh"
     local backup_script="${current_script}.bak"
+    local current_version="$VERSION"
     
     # Download new version
     log_info "Downloading latest version..."
@@ -1206,6 +1207,19 @@ cmd_update() {
         log_error "Downloaded file doesn't appear to be a valid bash script"
         rm -f "$temp_script"
         exit 1
+    fi
+    
+    # Extract version from downloaded script
+    local new_version=$(grep -m 1 '^VERSION=' "$temp_script" | cut -d'"' -f2)
+    if [[ -z "$new_version" ]]; then
+        new_version="unknown"
+    fi
+    
+    # Check if update is needed
+    if [[ "$current_version" == "$new_version" ]]; then
+        log_info "Already running the latest version ($current_version)"
+        rm -f "$temp_script"
+        return 0
     fi
     
     # Backup current script
@@ -1234,7 +1248,8 @@ cmd_update() {
     log_info "═══════════════════════════════════════════="
     log_info "RNAS Script Updated Successfully!"
     log_info "═══════════════════════════════════════════="
-    log_info "New Version: $current_script"
+    log_info "Version: $current_version → $new_version"
+    log_info "Script: $current_script"
     log_info "Backup: $backup_script"
     log_info "═══════════════════════════════════════════="
 }
@@ -1519,19 +1534,24 @@ EOF
 #=============================================================================
 
 main() {
+    check_root
+    check_debian
+    
+    # Set default configuration first (fallback)
+    set_default_config
+    
     if [[ $# -eq 0 ]]; then
+        # Load config for help display (suppress warnings)
+        if [[ -f "$CONFIG_FILE" ]]; then
+            source "$CONFIG_FILE" 2>/dev/null || true
+        fi
+        set_derived_variables
         cmd_help
         exit 1
     fi
     
     local command="$1"
     shift
-    
-    check_root
-    check_debian
-    
-    # Set default configuration first (fallback)
-    set_default_config
     
     # Load config file if exists (except for init command which creates it)
     if [[ "$command" != "init" ]]; then
