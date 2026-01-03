@@ -55,6 +55,13 @@ check_root() {
     fi
 }
 
+check_debian() {
+    if [[ ! -f /etc/debian_version ]]; then
+        log_error "This script can only be run on Debian-based systems"
+        exit 1
+    fi
+}
+
 create_rnas_dirs() {
     if [[ ! -d "$RNAS_DIR" ]]; then
         mkdir -p "$RNAS_DIR"
@@ -109,6 +116,13 @@ cmd_init() {
         exit 0
     fi
     
+    # Install required packages
+    log_info "Installing required packages..."
+    apt-get update -qq
+    apt-get install -y -qq rsync util-linux coreutils e2fsprogs openssh-client cron curl || {
+        log_warn "Some packages failed to install, continuing anyway..."
+    }
+    
     # Create directories
     create_rnas_dirs
     
@@ -149,8 +163,10 @@ cmd_init() {
     log_info "Setting up backup cronjob..."
     local cron_cmd="$RNAS_DIR/rnas.sh backup"
     (crontab -l 2>/dev/null | grep -v "rnas.sh backup"; echo "$CRON_SCHEDULE $cron_cmd") | crontab -
-    
-    log_info ""
+        # Reload systemd daemon
+    log_info "Reloading systemd daemon..."
+    systemctl daemon-reload || log_warn "Failed to reload systemd daemon"
+        log_info ""
     log_info "════════════════════════════════════════════"
     log_info "RNAS Initialization Completed Successfully!"
     log_info "════════════════════════════════════════════"
@@ -359,6 +375,131 @@ cmd_copy_only() {
     log_info "════════════════════════════════════════════"
 }
 
+cmd_update() {
+    log_info "Updating RNAS script..."
+    
+    local script_url="https://raw.githubusercontent.com/Hirakamu/script-bank/refs/heads/main/general%20script/rnas.sh?token=GHSAT0AAAAAADRLJO5ZLC7CNZGK5JYSOVTI2KYRQKQ"
+    local current_script="$(readlink -f "$0")"
+    local temp_script="/tmp/rnas-update-$$.sh"
+    local backup_script="${current_script}.bak"
+    
+    # Download new version
+    log_info "Downloading latest version..."
+    if ! curl -fsSL "$script_url" -o "$temp_script"; then
+        log_error "Failed to download script from GitHub"
+        rm -f "$temp_script"
+        exit 1
+    fi
+    
+    # Verify downloaded file is a valid bash script
+    if ! head -n 1 "$temp_script" | grep -q "^#!/bin/bash"; then
+        log_error "Downloaded file doesn't appear to be a valid bash script"
+        rm -f "$temp_script"
+        exit 1
+    fi
+    
+    # Backup current script
+    log_info "Backing up current script..."
+    cp "$current_script" "$backup_script"
+    
+    # Replace with new version
+    log_info "Installing new version..."
+    mv "$temp_script" "$current_script"
+    chmod +x "$current_script"
+    
+    # Update copies in /var/rnas if exists
+    if [[ -f "$RNAS_DIR/rnas.sh" ]]; then
+        log_info "Updating RNAS directory copy..."
+        cp "$current_script" "$RNAS_DIR/rnas.sh"
+        chmod +x "$RNAS_DIR/rnas.sh"
+    fi
+    
+    log_info ""
+    log_info "═══════════════════════════════════════════="
+    log_info "RNAS Script Updated Successfully!"
+    log_info "═══════════════════════════════════════════="
+    log_info "New Version: $current_script"
+    log_info "Backup: $backup_script"
+    log_info "═══════════════════════════════════════════="
+}
+
+cmd_repair() {
+    log_info "Starting repair procedure..."
+    
+    # Check if initialized
+    if [[ ! -f "$DISK_EXIST_FILE" ]]; then
+        log_error "RNAS not initialized. Run 'rnas init' first"
+        exit 1
+    fi
+    
+    if [[ ! -f "$IMAGE_PATH" ]]; then
+        log_error "Image disk not found at $IMAGE_PATH. Cannot repair."
+        exit 1
+    fi
+    
+    log_info "Repairing RNAS configuration..."
+    
+    # Ensure directories exist
+    create_rnas_dirs
+    
+    # Copy script to /var/rnas if missing
+    if [[ ! -f "$RNAS_DIR/rnas.sh" ]]; then
+        log_info "Copying rnas.sh to $RNAS_DIR..."
+        cp "$(readlink -f "$0")" "$RNAS_DIR/rnas.sh"
+        chmod +x "$RNAS_DIR/rnas.sh"
+    fi
+    
+    # Re-add symlink
+    log_info "Re-creating symlink in PATH..."
+    ln -sf "$RNAS_DIR/rnas.sh" /usr/local/bin/rnas
+    
+    # Re-add fstab entry if missing
+    log_info "Checking fstab entry..."
+    if ! grep -q "$IMAGE_PATH" /etc/fstab; then
+        log_info "Adding fstab entry..."
+        echo "$IMAGE_PATH $MOUNT_POINT ext4 defaults,nofail 0 2" >> /etc/fstab
+    else
+        log_info "fstab entry already exists"
+    fi
+    
+    # Remount if not mounted
+    log_info "Checking mount status..."
+    if ! grep -q "$IMAGE_PATH" /proc/mounts; then
+        log_info "Mounting filesystem..."
+        mount "$IMAGE_PATH" "$MOUNT_POINT" || {
+            log_error "Failed to mount filesystem"
+            log_info "You may need to check the image with: fsck.ext4 $IMAGE_PATH"
+            exit 1
+        }
+        chmod 755 "$MOUNT_POINT"
+    else
+        log_info "Filesystem already mounted"
+    fi
+    
+    # Re-add cronjob if missing
+    log_info "Checking backup cronjob..."
+    if ! crontab -l 2>/dev/null | grep -q "rnas.sh backup"; then
+        log_info "Adding backup cronjob..."
+        local cron_cmd="$RNAS_DIR/rnas.sh backup"
+        (crontab -l 2>/dev/null; echo "$CRON_SCHEDULE $cron_cmd") | crontab -
+    else
+        log_info "Cronjob already exists"
+    fi
+    
+    # Reload systemd daemon
+    log_info "Reloading systemd daemon..."
+    systemctl daemon-reload || log_warn "Failed to reload systemd daemon"
+    
+    log_info ""
+    log_info "═══════════════════════════════════════════="
+    log_info "RNAS Repair Completed!"
+    log_info "═══════════════════════════════════════════="
+    log_info "Image Path: $IMAGE_PATH"
+    log_info "Mount Point: $MOUNT_POINT"
+    log_info "Mount Status: $(grep -q "$IMAGE_PATH" /proc/mounts && echo 'Mounted' || echo 'Not Mounted')"
+    log_info "═══════════════════════════════════════════="
+}
+
 cmd_expand() {
     if [[ $# -lt 1 ]]; then
         log_error "expand requires an increment size (e.g., expand 5 for 5GB)"
@@ -435,6 +576,8 @@ Commands:
   purge             Delete RNAS without backup (permanent)
   copy-only         Create a backup copy without sending to server
   expand SIZE       Expand disk by SIZE GB (e.g., expand 5)
+  repair            Repair RNAS configuration (fstab, cronjob, mount, symlink)
+  update            Update RNAS script to latest version from GitHub
   help              Show this help message
 
 Examples:
@@ -444,6 +587,8 @@ Examples:
   sudo rnas.sh purge
   sudo rnas.sh copy-only
   sudo rnas.sh expand 10
+  sudo rnas.sh repair
+  sudo rnas.sh update
 
 Configuration:
   RNAS Directory:   $RNAS_DIR
@@ -469,6 +614,7 @@ main() {
     shift
     
     check_root
+    check_debian
     
     case "$command" in
         init)
@@ -488,6 +634,12 @@ main() {
             ;;
         expand)
             cmd_expand "$@"
+            ;;
+        repair)
+            cmd_repair
+            ;;
+        update)
+            cmd_update
             ;;
         help|--help|-h)
             cmd_help
