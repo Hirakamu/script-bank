@@ -3,13 +3,18 @@
 #=============================================================================
 # RNAS Management Script
 # Purpose: Manage remote NAS disk initialization, backup, deletion, and maintenance
+# Version: 1.3
 #=============================================================================
 
 set -euo pipefail
 
+# Version
+VERSION="1.3"
+
 # Configuration
 RNAS_DIR="/var/rnas"
 DISK_EXIST_FILE="${RNAS_DIR}/DISK_EXIST"
+BACKUP_DISABLED_FILE="${RNAS_DIR}/BACKUP_DISABLED"
 MOUNT_POINT="/mnt/rnas/$(hostname)"
 IMAGE_PATH="${RNAS_DIR}/$(hostname).img"
 COPY_IMAGE_PATH="${RNAS_DIR}/$(hostname)-copy.img"
@@ -178,6 +183,94 @@ cmd_init() {
     log_info "════════════════════════════════════════════"
 }
 
+cmd_status() {
+    echo -e "\n${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}                    RNAS Status Report${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}\n"
+    
+    echo -e "${YELLOW}Version:${NC} $VERSION"
+    echo -e "${YELLOW}Hostname:${NC} $(hostname)"
+    echo ""
+    
+    # Installation status
+    if [[ -f "$DISK_EXIST_FILE" ]]; then
+        echo -e "${YELLOW}Installation Status:${NC} ${GREEN}✓ Installed${NC}"
+    else
+        echo -e "${YELLOW}Installation Status:${NC} ${RED}✗ Not Installed${NC}"
+        echo -e "\n${YELLOW}Run 'rnas init' to initialize RNAS${NC}\n"
+        return 0
+    fi
+    
+    # Image disk status
+    if [[ -f "$IMAGE_PATH" ]]; then
+        local image_size=$(get_disk_size "$IMAGE_PATH")
+        echo -e "${YELLOW}Image Disk:${NC} ${GREEN}✓ Exists${NC} ($image_size)"
+        echo -e "${YELLOW}Image Path:${NC} $IMAGE_PATH"
+    else
+        echo -e "${YELLOW}Image Disk:${NC} ${RED}✗ Missing${NC}"
+    fi
+    
+    # Mount status
+    if grep -q "$IMAGE_PATH" /proc/mounts 2>/dev/null; then
+        echo -e "${YELLOW}Mount Status:${NC} ${GREEN}✓ Mounted${NC}"
+        echo -e "${YELLOW}Mount Point:${NC} $MOUNT_POINT"
+        
+        # Disk usage
+        if [[ -d "$MOUNT_POINT" ]]; then
+            local usage=$(df -h "$MOUNT_POINT" 2>/dev/null | tail -1 | awk '{print $3 " / " $2 " (" $5 " used)"}')
+            echo -e "${YELLOW}Disk Usage:${NC} $usage"
+        fi
+    else
+        echo -e "${YELLOW}Mount Status:${NC} ${RED}✗ Not Mounted${NC}"
+    fi
+    
+    # Backup status
+    if crontab -l 2>/dev/null | grep -q "rnas.sh backup"; then
+        if [[ -f "$BACKUP_DISABLED_FILE" ]]; then
+            echo -e "${YELLOW}Auto Backup:${NC} ${YELLOW}⚠ Disabled${NC}"
+        else
+            echo -e "${YELLOW}Auto Backup:${NC} ${GREEN}✓ Enabled${NC}"
+        fi
+        echo -e "${YELLOW}Backup Schedule:${NC} $CRON_SCHEDULE"
+    else
+        echo -e "${YELLOW}Auto Backup:${NC} ${RED}✗ Not Configured${NC}"
+    fi
+    
+    # Last backup time
+    if [[ -f "$IMAGE_PATH" ]]; then
+        local last_modified=$(stat -c %y "$IMAGE_PATH" 2>/dev/null | cut -d'.' -f1)
+        echo -e "${YELLOW}Image Last Modified:${NC} $last_modified"
+    fi
+    
+    # Check for backup copy
+    if [[ -f "$COPY_IMAGE_PATH" ]]; then
+        local copy_size=$(get_disk_size "$COPY_IMAGE_PATH")
+        echo -e "${YELLOW}Backup Copy:${NC} ${GREEN}✓ Exists${NC} ($copy_size)"
+    fi
+    
+    # Remote server info
+    echo ""
+    echo -e "${YELLOW}Remote Server:${NC} $REMOTE_SERVER:$REMOTE_PORT"
+    echo -e "${YELLOW}Remote Path:${NC} $REMOTE_PATH"
+    
+    # fstab check
+    echo ""
+    if grep -q "$IMAGE_PATH" /etc/fstab 2>/dev/null; then
+        echo -e "${YELLOW}fstab Entry:${NC} ${GREEN}✓ Configured${NC}"
+    else
+        echo -e "${YELLOW}fstab Entry:${NC} ${RED}✗ Missing${NC}"
+    fi
+    
+    # Symlink check
+    if [[ -L "/usr/local/bin/rnas" ]]; then
+        echo -e "${YELLOW}PATH Symlink:${NC} ${GREEN}✓ Configured${NC}"
+    else
+        echo -e "${YELLOW}PATH Symlink:${NC} ${YELLOW}⚠ Missing${NC}"
+    fi
+    
+    echo -e "\n${GREEN}═══════════════════════════════════════════════════════════${NC}\n"
+}
+
 cmd_backup() {
     log_info "Starting backup procedure..."
     
@@ -185,6 +278,12 @@ cmd_backup() {
     if [[ ! -f "$DISK_EXIST_FILE" ]]; then
         log_error "RNAS not initialized. Run 'rnas init' first"
         exit 1
+    fi
+    
+    # Check if backup is disabled
+    if [[ -f "$BACKUP_DISABLED_FILE" ]]; then
+        log_warn "Automatic backups are disabled. Skipping backup."
+        exit 0
     fi
     
     if [[ ! -f "$IMAGE_PATH" ]]; then
@@ -263,6 +362,7 @@ cmd_delete() {
     # Remove DISK_EXIST marker
     log_info "Removing DISK_EXIST marker..."
     rm -f "$DISK_EXIST_FILE"
+    rm -f "$BACKUP_DISABLED_FILE"
     
     # Remove image and directories
     log_info "Removing disk image and directories..."
@@ -321,6 +421,7 @@ cmd_purge() {
     # Remove DISK_EXIST marker
     log_info "Removing DISK_EXIST marker..."
     rm -f "$DISK_EXIST_FILE"
+    rm -f "$BACKUP_DISABLED_FILE"
     
     # Remove image and directories
     log_info "Removing disk image and directories..."
@@ -509,6 +610,66 @@ cmd_repair() {
     log_info "═══════════════════════════════════════════="
 }
 
+cmd_enable_backup() {
+    log_info "Enabling automatic backups..."
+    
+    # Check if initialized
+    if [[ ! -f "$DISK_EXIST_FILE" ]]; then
+        log_error "RNAS not initialized. Run 'rnas init' first"
+        exit 1
+    fi
+    
+    # Remove disabled flag
+    if [[ -f "$BACKUP_DISABLED_FILE" ]]; then
+        rm -f "$BACKUP_DISABLED_FILE"
+        log_info "Automatic backups have been enabled"
+    else
+        log_info "Automatic backups are already enabled"
+    fi
+    
+    # Ensure cronjob exists
+    if ! crontab -l 2>/dev/null | grep -q "rnas.sh backup"; then
+        log_info "Re-adding backup cronjob..."
+        local cron_cmd="$RNAS_DIR/rnas.sh backup"
+        (crontab -l 2>/dev/null; echo "$CRON_SCHEDULE $cron_cmd") | crontab -
+    fi
+    
+    log_info ""
+    log_info "═══════════════════════════════════════════"
+    log_info "Automatic Backups Enabled"
+    log_info "═══════════════════════════════════════════"
+    log_info "Schedule: $CRON_SCHEDULE"
+    log_info "═══════════════════════════════════════════"
+}
+
+cmd_disable_backup() {
+    log_info "Disabling automatic backups..."
+    
+    # Check if initialized
+    if [[ ! -f "$DISK_EXIST_FILE" ]]; then
+        log_error "RNAS not initialized. Run 'rnas init' first"
+        exit 1
+    fi
+    
+    # Confirmation
+    if ! confirm "Disable automatic backups? You can still run manual backups. Continue? (Y/n): "; then
+        log_info "Operation cancelled"
+        exit 0
+    fi
+    
+    # Create disabled flag
+    touch "$BACKUP_DISABLED_FILE"
+    
+    log_info ""
+    log_info "═══════════════════════════════════════════"
+    log_info "Automatic Backups Disabled"
+    log_info "═══════════════════════════════════════════"
+    log_info "Cronjob will skip backups until re-enabled"
+    log_info "Manual backups can still be run with: rnas backup --force"
+    log_info "To re-enable: rnas enable-backup"
+    log_info "═══════════════════════════════════════════"
+}
+
 cmd_expand() {
     if [[ $# -lt 1 ]]; then
         log_error "expand requires an increment size (e.g., expand 5 for 5GB)"
@@ -574,13 +735,17 @@ cmd_expand() {
 
 cmd_help() {
     cat << EOF
-RNAS Management Script
+RNAS Management Script v${VERSION}
 
 Usage: rnas.sh COMMAND [OPTIONS]
 
 Commands:
   init              Initialize RNAS system (creates disk, mounts, sets up backup)
+  status            Show detailed RNAS status and configuration
   backup            Backup disk image to remote server
+  backup --force    Force backup even if disabled
+  enable-backup     Enable automatic daily backups
+  disable-backup    Disable automatic daily backups
   delete            Delete RNAS with backup before deletion
   purge             Delete RNAS without backup (permanent)
   copy-only         Create a backup copy without sending to server
@@ -591,7 +756,11 @@ Commands:
 
 Examples:
   sudo rnas.sh init
+  sudo rnas.sh status
   sudo rnas.sh backup
+  sudo rnas.sh backup --force
+  sudo rnas.sh enable-backup
+  sudo rnas.sh disable-backup
   sudo rnas.sh delete
   sudo rnas.sh purge
   sudo rnas.sh copy-only
@@ -629,8 +798,19 @@ main() {
         init)
             cmd_init
             ;;
+        status)
+            cmd_status
+            ;;
         backup)
-            cmd_backup
+            # Check for --force flag
+            if [[ "$1" == "--force" ]] && [[ -f "$BACKUP_DISABLED_FILE" ]]; then
+                log_warn "Forcing backup despite disabled flag..."
+                rm -f "$BACKUP_DISABLED_FILE"
+                cmd_backup
+                touch "$BACKUP_DISABLED_FILE"
+            else
+                cmd_backup
+            fi
             ;;
         delete)
             cmd_delete
@@ -643,6 +823,12 @@ main() {
             ;;
         expand)
             cmd_expand "$@"
+            ;;
+        enable-backup)
+            cmd_enable_backup
+            ;;
+        disable-backup)
+            cmd_disable_backup
             ;;
         repair)
             cmd_repair
