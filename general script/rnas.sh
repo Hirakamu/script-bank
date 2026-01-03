@@ -410,11 +410,17 @@ cmd_update() {
     mv "$temp_script" "$current_script"
     chmod +x "$current_script"
     
-    # Update copies in /var/rnas if exists
-    if [[ -f "$RNAS_DIR/rnas.sh" ]]; then
+    # Update copies in /var/rnas if exists and not already the same file
+    if [[ -f "$RNAS_DIR/rnas.sh" ]] && [[ "$current_script" != "$RNAS_DIR/rnas.sh" ]]; then
         log_info "Updating RNAS directory copy..."
         cp "$current_script" "$RNAS_DIR/rnas.sh"
         chmod +x "$RNAS_DIR/rnas.sh"
+    fi
+    
+    # Refresh symlink if needed
+    if [[ -L "/usr/local/bin/rnas" ]]; then
+        log_info "Refreshing PATH symlink..."
+        ln -sf "$RNAS_DIR/rnas.sh" /usr/local/bin/rnas
     fi
     
     log_info ""
