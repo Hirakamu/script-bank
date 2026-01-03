@@ -11,7 +11,11 @@ set -euo pipefail
 # Version
 VERSION="1.3"
 
-# Configuration
+# Config file location
+CONFIG_DIR="/etc/rnas"
+CONFIG_FILE="${CONFIG_DIR}/rnas.conf"
+
+# Default Configuration (can be overridden by config file)
 RNAS_DIR="/var/rnas"
 DISK_EXIST_FILE="${RNAS_DIR}/DISK_EXIST"
 BACKUP_DISABLED_FILE="${RNAS_DIR}/BACKUP_DISABLED"
@@ -102,6 +106,612 @@ get_disk_size() {
 }
 
 #=============================================================================
+# Configuration Functions
+#=============================================================================
+
+set_default_config() {
+    # Set default configuration values (used as fallback)
+    RNAS_DIR="/var/rnas"
+    IMAGE_SIZE="10G"
+    REMOTE_SERVER="ip.hirakamu.my.id"
+    REMOTE_PORT="9901"
+    REMOTE_PATH="/receive"
+    CRON_SCHEDULE="0 2 * * *"
+}
+
+set_derived_variables() {
+    # Set variables derived from configuration
+    DISK_EXIST_FILE="${RNAS_DIR}/DISK_EXIST"
+    BACKUP_DISABLED_FILE="${RNAS_DIR}/BACKUP_DISABLED"
+    MOUNT_POINT="/mnt/rnas/$(hostname)"
+    IMAGE_PATH="${RNAS_DIR}/$(hostname).img"
+    COPY_IMAGE_PATH="${RNAS_DIR}/$(hostname)-copy.img"
+}
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        log_info "Loading configuration from $CONFIG_FILE"
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" || {
+            log_error "Failed to load configuration file"
+            return 1
+        }
+    else
+        log_warn "No configuration file found, using defaults"
+    fi
+    
+    # Always set derived variables after loading config
+    set_derived_variables
+}
+
+validate_config() {
+    local errors=0
+    
+    # Validate IMAGE_SIZE format
+    if ! [[ "$IMAGE_SIZE" =~ ^[0-9]+[GMK]$ ]]; then
+        log_error "Invalid IMAGE_SIZE: '$IMAGE_SIZE' (must match format: number+G/M/K, e.g., 10G, 500M)"
+        ((errors++))
+    fi
+    
+    # Validate CRON_SCHEDULE has 5 fields
+    local cron_fields=$(echo "$CRON_SCHEDULE" | wc -w)
+    if [[ $cron_fields -ne 5 ]]; then
+        log_error "Invalid CRON_SCHEDULE: '$CRON_SCHEDULE' (must have 5 fields: minute hour day month weekday)"
+        ((errors++))
+    fi
+    
+    # Validate REMOTE_PORT is numeric and in valid range
+    if ! [[ "$REMOTE_PORT" =~ ^[0-9]+$ ]] || [[ $REMOTE_PORT -lt 1 ]] || [[ $REMOTE_PORT -gt 65535 ]]; then
+        log_error "Invalid REMOTE_PORT: '$REMOTE_PORT' (must be numeric, 1-65535)"
+        ((errors++))
+    fi
+    
+    # Validate paths are absolute
+    if ! [[ "$RNAS_DIR" =~ ^/ ]]; then
+        log_error "Invalid RNAS_DIR: '$RNAS_DIR' (must be absolute path starting with /)"
+        ((errors++))
+    fi
+    
+    if ! [[ "$REMOTE_PATH" =~ ^/ ]]; then
+        log_error "Invalid REMOTE_PATH: '$REMOTE_PATH' (must be absolute path starting with /)"
+        ((errors++))
+    fi
+    
+    # Validate REMOTE_SERVER is not empty
+    if [[ -z "$REMOTE_SERVER" ]]; then
+        log_error "REMOTE_SERVER cannot be empty"
+        ((errors++))
+    fi
+    
+    if [[ $errors -gt 0 ]]; then
+        log_error "Configuration validation failed with $errors error(s)"
+        return 1
+    fi
+    
+    return 0
+}
+
+generate_default_config() {
+    local config_path="$1"
+    
+    cat > "$config_path" << 'EOF'
+#!/bin/bash
+#=============================================================================
+# RNAS Configuration File
+# Location: /etc/rnas/rnas.conf
+# Edit with: sudo rnas config-edit
+# Validate with: sudo rnas config-validate
+#=============================================================================
+
+# Base directory for RNAS files (disk images, markers, etc.)
+# Default: /var/rnas
+RNAS_DIR="/var/rnas"
+
+# Initial disk image size (number + suffix: G=GB, M=MB, K=KB)
+# Examples: 10G, 500M, 2T
+# Default: 10G
+IMAGE_SIZE="10G"
+
+# Remote backup server configuration
+# Hostname or IP address of the remote server
+REMOTE_SERVER="ip.hirakamu.my.id"
+
+# SSH port for remote connection
+# Default: 9901
+REMOTE_PORT="9901"
+
+# Destination path on remote server (must be absolute)
+# Default: /receive
+REMOTE_PATH="/receive"
+
+# Backup schedule in cron format
+# Format: minute hour day month weekday
+# Examples:
+#   0 2 * * *    - Daily at 2:00 AM (default)
+#   0 */6 * * *  - Every 6 hours
+#   0 0 * * 0    - Weekly on Sunday at midnight
+#   0 3 * * 1-5  - Weekdays at 3:00 AM
+CRON_SCHEDULE="0 2 * * *"
+
+#=============================================================================
+# Derived variables (automatically set, do not modify):
+#   MOUNT_POINT = /mnt/rnas/$(hostname)
+#   IMAGE_PATH = ${RNAS_DIR}/$(hostname).img
+#=============================================================================
+EOF
+    
+    chmod 644 "$config_path"
+    log_info "Generated configuration file: $config_path"
+}
+
+#=============================================================================
+# SSH Key Management Functions
+#=============================================================================
+
+check_ssh_key() {
+    # Check for existing SSH keys
+    if [[ -f ~/.ssh/id_ed25519 ]]; then
+        echo ~/.ssh/id_ed25519
+        return 0
+    elif [[ -f ~/.ssh/id_rsa ]]; then
+        echo ~/.ssh/id_rsa
+        return 0
+    fi
+    return 1
+}
+
+generate_ssh_key() {
+    local key_path=~/.ssh/id_ed25519
+    
+    log_info "Generating SSH key pair..."
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
+    
+    ssh-keygen -t ed25519 -f "$key_path" -N "" -C "rnas@$(hostname)" -q
+    
+    chmod 600 "$key_path"
+    chmod 644 "${key_path}.pub"
+    
+    log_info "SSH key generated: $key_path"
+    echo "$key_path"
+}
+
+get_public_key() {
+    local key_path
+    if key_path=$(check_ssh_key); then
+        cat "${key_path}.pub"
+    else
+        return 1
+    fi
+}
+
+test_ssh_connection() {
+    log_info "Testing connection to ${REMOTE_SERVER}:${REMOTE_PORT}..."
+    
+    if timeout 10 ssh -p "$REMOTE_PORT" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new \
+        "root@${REMOTE_SERVER}" \
+        "echo 'SSH_OK'" &>/dev/null; then
+        log_info "SSH connection successful ✓"
+        return 0
+    else
+        log_error "SSH connection failed"
+        return 1
+    fi
+}
+
+verify_backup_connectivity() {
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}     RNAS Connection Verification${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo ""
+    
+    local checks_passed=0
+    local checks_total=5
+    
+    # Check 1: SSH Key
+    echo -e "${YELLOW}[1/5]${NC} Checking local SSH key..."
+    if check_ssh_key &>/dev/null; then
+        local key_path=$(check_ssh_key)
+        echo -e "  ${GREEN}✓${NC} Private key found: $key_path"
+        echo -e "  ${GREEN}✓${NC} Public key found: ${key_path}.pub"
+        ((checks_passed++))
+    else
+        echo -e "  ${RED}✗${NC} No SSH key found"
+    fi
+    
+    # Check 2: DNS Resolution
+    echo -e "${YELLOW}[2/5]${NC} Testing DNS resolution..."
+    if host "$REMOTE_SERVER" &>/dev/null; then
+        local ip=$(host "$REMOTE_SERVER" | grep "has address" | head -1 | awk '{print $NF}')
+        echo -e "  ${GREEN}✓${NC} $REMOTE_SERVER resolves to $ip"
+        ((checks_passed++))
+    else
+        echo -e "  ${RED}✗${NC} Failed to resolve $REMOTE_SERVER"
+    fi
+    
+    # Check 3: Network Connectivity
+    echo -e "${YELLOW}[3/5]${NC} Testing network connectivity..."
+    if timeout 5 ping -c 1 "$REMOTE_SERVER" &>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} Host is reachable (ping successful)"
+        ((checks_passed++))
+    else
+        echo -e "  ${YELLOW}⚠${NC} Ping failed (may be blocked by firewall)"
+    fi
+    
+    # Check 4: SSH Connection
+    echo -e "${YELLOW}[4/5]${NC} Testing SSH connection..."
+    if timeout 10 ssh -p "$REMOTE_PORT" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new \
+        "root@${REMOTE_SERVER}" \
+        "echo 'OK'" &>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} SSH authentication successful"
+        echo -e "  ${GREEN}✓${NC} Connected to ${REMOTE_SERVER}:${REMOTE_PORT}"
+        ((checks_passed++))
+    else
+        echo -e "  ${RED}✗${NC} SSH connection failed"
+    fi
+    
+    # Check 5: Remote Path Access
+    echo -e "${YELLOW}[5/5]${NC} Testing remote path access..."
+    if timeout 10 ssh -p "$REMOTE_PORT" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        "root@${REMOTE_SERVER}" \
+        "test -d ${REMOTE_PATH} && test -w ${REMOTE_PATH} && echo 'OK'" &>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} Path $REMOTE_PATH exists"
+        echo -e "  ${GREEN}✓${NC} Path is writable"
+        
+        # Try to get available space
+        local space=$(timeout 10 ssh -p "$REMOTE_PORT" \
+            -o BatchMode=yes \
+            "root@${REMOTE_SERVER}" \
+            "df -BG ${REMOTE_PATH} 2>/dev/null | tail -1 | awk '{print \$4}'" 2>/dev/null || echo "unknown")
+        if [[ "$space" != "unknown" ]]; then
+            echo -e "  ${GREEN}✓${NC} Available space: $space"
+        fi
+        ((checks_passed++))
+    else
+        echo -e "  ${RED}✗${NC} Failed to access $REMOTE_PATH"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    if [[ $checks_passed -eq $checks_total ]]; then
+        echo -e "${GREEN}Result: All checks passed ✓${NC}"
+        echo -e "${GREEN}════════════════════════════════════════════${NC}"
+        echo ""
+        echo "Your RNAS backup is properly configured and ready to use."
+        return 0
+    else
+        echo -e "${YELLOW}Result: $checks_passed/$checks_total checks passed${NC}"
+        echo -e "${GREEN}════════════════════════════════════════════${NC}"
+        echo ""
+        echo -e "${YELLOW}Some checks failed. Run 'sudo rnas setup-ssh' to fix SSH issues.${NC}"
+        return 1
+    fi
+}
+
+setup_ssh_keys() {
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}         SSH Key Setup Required${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Check/generate SSH key
+    local key_path
+    if key_path=$(check_ssh_key); then
+        log_info "Using existing SSH key: $key_path"
+    else
+        key_path=$(generate_ssh_key)
+    fi
+    
+    local pub_key=$(cat "${key_path}.pub")
+    
+    # Test connection
+    log_info "Testing connection to ${REMOTE_SERVER}:${REMOTE_PORT}..."
+    if test_ssh_connection; then
+        echo ""
+        echo -e "${GREEN}SSH connection already working! ✓${NC}"
+        return 0
+    fi
+    
+    echo ""
+    echo -e "${YELLOW}SSH connection failed. Your public key needs to be added to the remote server.${NC}"
+    echo ""
+    echo "Public Key:"
+    echo "────────────────────────────────────────────"
+    echo "$pub_key"
+    echo "────────────────────────────────────────────"
+    echo ""
+    echo "Setup Options:"
+    echo "  1. Automatic setup (requires password, recommended)"
+    echo "  2. Manual setup (copy/paste instructions)"
+    echo "  3. Skip for now (backups will fail!)"
+    echo ""
+    
+    local choice
+    read -p "$(echo -e ${YELLOW}Choose option [1]: ${NC})" choice
+    choice=${choice:-1}
+    
+    case "$choice" in
+        1)
+            echo ""
+            log_info "Attempting automatic key installation..."
+            if ssh-copy-id -p "$REMOTE_PORT" "root@${REMOTE_SERVER}" 2>/dev/null; then
+                log_info "Key successfully added to remote server ✓"
+                echo ""
+                if test_ssh_connection; then
+                    echo ""
+                    echo -e "${GREEN}✓ SSH setup completed successfully!${NC}"
+                    return 0
+                fi
+            else
+                log_error "Automatic setup failed"
+                echo ""
+                echo "Falling back to manual setup..."
+                setup_ssh_keys_manual "$pub_key"
+            fi
+            ;;
+        2)
+            setup_ssh_keys_manual "$pub_key"
+            ;;
+        3)
+            log_warn "Skipping SSH setup"
+            echo ""
+            echo -e "${RED}⚠ WARNING: Backups will fail until SSH is properly configured!${NC}"
+            echo ""
+            echo "You can run 'sudo rnas setup-ssh' later to complete the setup."
+            return 1
+            ;;
+        *)
+            log_error "Invalid choice"
+            return 1
+            ;;
+    esac
+}
+
+setup_ssh_keys_manual() {
+    local pub_key="$1"
+    
+    echo ""
+    echo "Manual Setup Instructions:"
+    echo "════════════════════════════════════════════"
+    echo ""
+    echo "1. Copy your public key (shown above)"
+    echo ""
+    echo "2. On the remote server (${REMOTE_SERVER}), run:"
+    echo ""
+    echo "   mkdir -p ~/.ssh"
+    echo "   echo \"$pub_key\" >> ~/.ssh/authorized_keys"
+    echo "   chmod 700 ~/.ssh"
+    echo "   chmod 600 ~/.ssh/authorized_keys"
+    echo ""
+    echo "3. OR use this one-liner on your local machine:"
+    echo ""
+    echo "   ssh-copy-id -p $REMOTE_PORT root@${REMOTE_SERVER}"
+    echo ""
+    echo "════════════════════════════════════════════"
+    echo ""
+    
+    read -p "Press Enter when ready to test connection... "
+    
+    echo ""
+    if test_ssh_connection; then
+        echo ""
+        echo -e "${GREEN}✓ SSH setup completed successfully!${NC}"
+        return 0
+    else
+        echo ""
+        echo -e "${RED}Connection still failing.${NC}"
+        echo ""
+        if confirm "Try testing again? (Y/n): "; then
+            setup_ssh_keys_manual "$pub_key"
+        else
+            log_warn "SSH setup incomplete"
+            return 1
+        fi
+    fi
+}
+
+#=============================================================================
+# Configuration Management Commands
+#=============================================================================
+
+cmd_config_show() {
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}    Current RNAS Configuration${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo ""
+    
+    if [[ -f "$CONFIG_FILE" ]]; then
+        echo -e "${YELLOW}Config File:${NC} $CONFIG_FILE ${GREEN}✓${NC}"
+        local last_mod=$(stat -c %y "$CONFIG_FILE" 2>/dev/null | cut -d'.' -f1 || echo "unknown")
+        echo -e "${YELLOW}Last Modified:${NC} $last_mod"
+    else
+        echo -e "${YELLOW}Config File:${NC} $CONFIG_FILE ${RED}✗ Not found${NC}"
+        echo -e "${YELLOW}Status:${NC} Using built-in defaults"
+    fi
+    
+    echo ""
+    echo -e "${YELLOW}RNAS_DIR${NC}         = $RNAS_DIR"
+    echo -e "${YELLOW}IMAGE_SIZE${NC}       = $IMAGE_SIZE"
+    echo -e "${YELLOW}REMOTE_SERVER${NC}    = $REMOTE_SERVER"
+    echo -e "${YELLOW}REMOTE_PORT${NC}      = $REMOTE_PORT"
+    echo -e "${YELLOW}REMOTE_PATH${NC}      = $REMOTE_PATH"
+    echo -e "${YELLOW}CRON_SCHEDULE${NC}    = $CRON_SCHEDULE"
+    
+    echo ""
+    echo -e "${YELLOW}Derived Values:${NC}"
+    echo -e "  MOUNT_POINT    = $MOUNT_POINT"
+    echo -e "  IMAGE_PATH     = $IMAGE_PATH"
+    
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo ""
+}
+
+cmd_config_edit() {
+    # Check if config exists
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log_warn "Configuration file not found"
+        if confirm "Create new configuration file? (Y/n): "; then
+            mkdir -p "$CONFIG_DIR"
+            generate_default_config "$CONFIG_FILE"
+        else
+            log_info "Operation cancelled"
+            return 0
+        fi
+    fi
+    
+    # Store original remote settings to detect changes
+    local old_server="$REMOTE_SERVER"
+    local old_port="$REMOTE_PORT"
+    local old_path="$REMOTE_PATH"
+    
+    # Create temporary copy
+    local temp_config=$(mktemp /tmp/rnas-config.XXXXXX)
+    cp "$CONFIG_FILE" "$temp_config"
+    
+    # Edit loop
+    while true; do
+        log_info "Opening configuration editor..."
+        ${EDITOR:-nano} "$temp_config"
+        
+        # Try to source and validate the temp config
+        echo ""
+        log_info "Validating configuration..."
+        
+        # Source in a subshell to test
+        if (source "$temp_config" && \
+            [[ -n "$RNAS_DIR" ]] && \
+            [[ -n "$IMAGE_SIZE" ]] && \
+            [[ -n "$REMOTE_SERVER" ]] && \
+            [[ -n "$REMOTE_PORT" ]] && \
+            [[ -n "$REMOTE_PATH" ]] && \
+            [[ -n "$CRON_SCHEDULE" ]]) 2>/dev/null; then
+            
+            # Load the config to validate it properly
+            source "$temp_config"
+            set_derived_variables
+            
+            if validate_config 2>/dev/null; then
+                log_info "Configuration is valid ✓"
+                
+                # Apply the changes
+                cp "$temp_config" "$CONFIG_FILE"
+                rm -f "$temp_config"
+                
+                # Check if remote settings changed
+                if [[ "$REMOTE_SERVER" != "$old_server" ]] || \
+                   [[ "$REMOTE_PORT" != "$old_port" ]] || \
+                   [[ "$REMOTE_PATH" != "$old_path" ]]; then
+                    echo ""
+                    log_warn "Remote server configuration changed"
+                    echo ""
+                    if confirm "Test connection to new remote server? (Y/n): "; then
+                        if ! test_ssh_connection; then
+                            echo ""
+                            if confirm "Connection failed. Run SSH setup wizard? (Y/n): "; then
+                                setup_ssh_keys
+                            fi
+                        fi
+                    fi
+                fi
+                
+                log_info "Configuration saved successfully"
+                return 0
+            else
+                echo ""
+                log_error "Configuration validation failed"
+            fi
+        else
+            echo ""
+            log_error "Configuration file has syntax errors or missing required values"
+        fi
+        
+        echo ""
+        if confirm "Re-edit configuration? (Y/n): "; then
+            continue
+        else
+            log_info "Discarding changes"
+            rm -f "$temp_config"
+            return 1
+        fi
+    done
+}
+
+cmd_config_validate() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log_error "Configuration file not found: $CONFIG_FILE"
+        echo "Run 'rnas init' to create one, or 'rnas config-edit' to create manually."
+        return 1
+    fi
+    
+    log_info "Validating configuration file: $CONFIG_FILE"
+    echo ""
+    
+    # Try to source the config
+    if source "$CONFIG_FILE" 2>/dev/null; then
+        set_derived_variables
+        if validate_config; then
+            echo ""
+            echo -e "${GREEN}✓ Configuration is valid${NC}"
+            return 0
+        else
+            echo ""
+            echo -e "${RED}✗ Configuration validation failed${NC}"
+            return 1
+        fi
+    else
+        log_error "Failed to load configuration file (syntax error)"
+        return 1
+    fi
+}
+
+cmd_config_reset() {
+    log_warn "Resetting configuration to defaults..."
+    
+    if [[ -f "$CONFIG_FILE" ]]; then
+        if ! confirm "This will overwrite your current configuration. Continue? (y/N): "; then
+            log_info "Operation cancelled"
+            return 0
+        fi
+        
+        # Backup existing config
+        local backup="${CONFIG_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
+        cp "$CONFIG_FILE" "$backup"
+        log_info "Backed up current config to: $backup"
+    fi
+    
+    mkdir -p "$CONFIG_DIR"
+    generate_default_config "$CONFIG_FILE"
+    
+    log_info ""
+    log_info "════════════════════════════════════════════"
+    log_info "Configuration Reset Complete"
+    log_info "════════════════════════════════════════════"
+    log_info "Config file: $CONFIG_FILE"
+    log_info "Edit with: sudo rnas config-edit"
+    log_info "════════════════════════════════════════════"
+}
+
+cmd_verify_connection() {
+    verify_backup_connectivity
+}
+
+cmd_setup_ssh() {
+    setup_ssh_keys
+}
+
+#=============================================================================
 # Main Functions
 #=============================================================================
 
@@ -115,11 +725,65 @@ cmd_init() {
         exit 1
     fi
     
-    # Confirmation
-    if ! confirm "Initialize RNAS with the following configuration?\n - Image: $IMAGE_PATH\n - Mount: $MOUNT_POINT\n - Size: $IMAGE_SIZE\n Continue? (Y/n): "; then
+    # Create config directory and file
+    log_info "Creating configuration directory..."
+    mkdir -p "$CONFIG_DIR"
+    
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        generate_default_config "$CONFIG_FILE"
+        echo ""
+    fi
+    
+    # Offer to edit configuration
+    if confirm "Edit configuration before initializing? (Y/n): "; then
+        cmd_config_edit
+        # Reload config after editing
+        source "$CONFIG_FILE"
+        set_derived_variables
+    fi
+    
+    # Validate configuration
+    echo ""
+    if ! validate_config; then
+        log_error "Configuration validation failed. Please fix the issues and try again."
+        exit 1
+    fi
+    
+    # Display configuration summary
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}     Configuration Summary${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}RNAS Directory:${NC}    $RNAS_DIR"
+    echo -e "${YELLOW}Image Size:${NC}        $IMAGE_SIZE"
+    echo -e "${YELLOW}Mount Point:${NC}       $MOUNT_POINT"
+    echo -e "${YELLOW}Remote Server:${NC}     ${REMOTE_SERVER}:${REMOTE_PORT}"
+    echo -e "${YELLOW}Remote Path:${NC}       $REMOTE_PATH"
+    echo -e "${YELLOW}Backup Schedule:${NC}   $CRON_SCHEDULE"
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Confirmation to proceed
+    if ! confirm "Proceed with initialization? (Y/n): "; then
         log_info "Initialization cancelled"
         exit 0
     fi
+    
+    # SSH Key Setup
+    echo ""
+    log_info "Setting up SSH keys for backup..."
+    if ! setup_ssh_keys; then
+        log_warn "SSH setup was skipped or failed"
+        echo ""
+        if ! confirm "Continue without SSH verification? (backups may fail) (y/N): "; then
+            log_info "Initialization cancelled"
+            log_info "You can complete SSH setup later with: sudo rnas setup-ssh"
+            exit 0
+        fi
+    fi
+    
+    echo ""
+    log_info "Proceeding with RNAS installation..."
     
     # Install required packages
     log_info "Installing required packages..."
@@ -290,6 +954,29 @@ cmd_backup() {
         log_error "Image disk not found at $IMAGE_PATH"
         exit 1
     fi
+    
+    # Pre-flight check: Test SSH connection
+    log_info "Verifying remote server connectivity..."
+    if ! timeout 10 ssh -p "$REMOTE_PORT" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new \
+        "root@${REMOTE_SERVER}" \
+        "echo 'OK'" &>/dev/null; then
+        log_error "SSH connection to ${REMOTE_SERVER}:${REMOTE_PORT} failed"
+        echo ""
+        echo "The remote server is unreachable or SSH authentication failed."
+        echo ""
+        echo "Troubleshooting:"
+        echo "  1. Verify remote server is online: ping ${REMOTE_SERVER}"
+        echo "  2. Test SSH manually: ssh -p ${REMOTE_PORT} root@${REMOTE_SERVER}"
+        echo "  3. Verify SSH keys: sudo rnas verify-connection"
+        echo "  4. Re-run key setup: sudo rnas setup-ssh"
+        echo ""
+        echo "Run 'sudo rnas verify-connection' for detailed diagnostics."
+        exit 1
+    fi
+    log_info "Remote server connectivity verified ✓"
     
     # Freeze
     freeze_filesystem
