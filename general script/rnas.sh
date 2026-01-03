@@ -204,8 +204,9 @@ cmd_backup() {
     
     # Rsync to remote server
     log_info "Syncing to remote server ($REMOTE_SERVER)..."
-    rsync -avzS --inplace --partial --progress --checksum \
-        -e "ssh -p $REMOTE_PORT" \
+    rsync -vS --compress-level=1 --inplace --partial --progress --timeout=300 \
+        --stats --human-readable \
+        -e "ssh -p $REMOTE_PORT -o Compression=no -o ServerAliveInterval=30" \
         "$COPY_IMAGE_PATH" \
         "root@${REMOTE_SERVER}:${REMOTE_PATH}/" || {
         log_error "Rsync failed, keeping backup for retry"
