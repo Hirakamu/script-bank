@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Version
-VERSION="2.0"
+VERSION="2.0.01"
 
 # Config file location
 CONFIG_DIR="/etc/rnas"
