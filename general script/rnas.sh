@@ -293,7 +293,7 @@ cmd_purge() {
     fi
     
     # Confirmation
-    if ! confirm "Purge RNAS WITHOUT backup? This cannot be undone! Continue? (Y/n): "; then
+    if ! confirm "Purge RNAS WITHOUT backup? This cannot be undone! Continue? (y/N): "; then
         log_info "Purge cancelled"
         exit 0
     fi
