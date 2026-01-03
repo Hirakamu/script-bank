@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Version
-VERSION="2.0.01"
+VERSION="2.0.02"
 
 # Config file location
 CONFIG_DIR="/etc/rnas"
@@ -1293,19 +1293,28 @@ cmd_repair() {
         log_info "fstab entry already exists"
     fi
     
-    # Remount if not mounted
+    # Unmount and remount to ensure clean state
     log_info "Checking mount status..."
-    if ! grep -q "$IMAGE_PATH" /proc/mounts; then
-        log_info "Mounting filesystem..."
-        mount "$IMAGE_PATH" "$MOUNT_POINT" || {
-            log_error "Failed to mount filesystem"
-            log_info "You may need to check the image with: fsck.ext4 $IMAGE_PATH"
-            exit 1
+    if grep -q "$IMAGE_PATH" /proc/mounts; then
+        log_info "Unmounting filesystem for repair..."
+        umount "$MOUNT_POINT" || {
+            log_warn "Standard unmount failed, trying force unmount..."
+            umount -l "$MOUNT_POINT" || {
+                log_error "Failed to unmount filesystem"
+                exit 1
+            }
         }
-        chmod 755 "$MOUNT_POINT"
-    else
-        log_info "Filesystem already mounted"
     fi
+    
+    # Remount filesystem
+    log_info "Mounting filesystem..."
+    mount "$IMAGE_PATH" "$MOUNT_POINT" || {
+        log_error "Failed to mount filesystem"
+        log_info "You may need to check the image with: fsck.ext4 $IMAGE_PATH"
+        exit 1
+    }
+    chmod 755 "$MOUNT_POINT"
+    log_info "Filesystem mounted successfully"
     
     # Re-add cronjob if missing
     log_info "Checking backup cronjob..."
