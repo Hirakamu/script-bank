@@ -1599,7 +1599,7 @@ main() {
             ;;
         backup)
             # Check for --force flag
-            if [[ "$1" == "--force" ]] && [[ -f "$BACKUP_DISABLED_FILE" ]]; then
+            if [[ "${1:-}" == "--force" ]] && [[ -f "$BACKUP_DISABLED_FILE" ]]; then
                 log_warn "Forcing backup despite disabled flag..."
                 rm -f "$BACKUP_DISABLED_FILE"
                 cmd_backup
