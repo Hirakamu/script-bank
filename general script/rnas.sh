@@ -162,11 +162,13 @@ cmd_init() {
     # Initialize cronjob
     log_info "Setting up backup cronjob..."
     local cron_cmd="$RNAS_DIR/rnas.sh backup"
-    (crontab -l 2>/dev/null | grep -v "rnas.sh backup"; echo "$CRON_SCHEDULE $cron_cmd") | crontab -
-        # Reload systemd daemon
+    (crontab -l 2>/dev/null | grep -v "rnas.sh backup" || true; echo "$CRON_SCHEDULE $cron_cmd") | crontab -
+    
+    # Reload systemd daemon
     log_info "Reloading systemd daemon..."
     systemctl daemon-reload || log_warn "Failed to reload systemd daemon"
-        log_info ""
+    
+    log_info ""
     log_info "════════════════════════════════════════════"
     log_info "RNAS Initialization Completed Successfully!"
     log_info "════════════════════════════════════════════"
