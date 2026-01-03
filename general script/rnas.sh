@@ -482,7 +482,7 @@ cmd_copy_only() {
 cmd_update() {
     log_info "Updating RNAS script..."
     
-    local script_url="https://raw.githubusercontent.com/Hirakamu/script-bank/refs/heads/main/general%20script/rnas.sh?token=GHSAT0AAAAAADRLJO5ZLC7CNZGK5JYSOVTI2KYRQKQ"
+    local script_url="https://raw.githubusercontent.com/Hirakamu/script-bank/refs/heads/main/general%20script/rnas.sh"
     local current_script="$(readlink -f "$0")"
     local temp_script="/tmp/rnas-update-$$.sh"
     local backup_script="${current_script}.bak"
